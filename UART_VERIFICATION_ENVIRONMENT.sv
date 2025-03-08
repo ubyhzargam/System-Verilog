@@ -162,206 +162,214 @@ endmodule
 
 
 
-interface uart_if;
+interface vif;
   logic uclktx;
   logic uclkrx;
   logic clk;
   logic rst;
   logic rx;
-  logic newd;
-  logic [7:0] dintx;
-  logic donetx;
-  logic donerx;
+  logic tx_start;
+  logic [7:0] data_in;
+  logic txdone;
+  logic rxdone;
   logic tx;
-  logic [7:0] doutrx;
+  logic [7:0] data_out;
 endinterface
 
 
 
-
-// Verification environment
+//VERIFICATION ENVIRONMENT
 
 class transaction;
-  
-  typedef enum bit {write =1'b0, read = 1'b1} oper_type;
-  randc oper_type oper;
-  
-  rand [7:0] dintx;
-  
-  bit rx;
-  bit newd;
-  bit donerx, donetx;
-  bit [7:0] doutrx;
-  bit tx;
-  
-  function transaction copy();
-    
-    copy=new();
-    copy.oper = this.oper;
-    copy.dintx=this.dintx;
-    copy.rx=this.rx;
-    copy.newd=this.newd;
-    copy.donerx=this.donerx;
-    copy.donetx=this.donetx;
-    copy.doutrx=this.doutrx;
-    copy.tx=this.tx;
-    
-  endfunction
-  
+
+ typedef enum bit {read=1'b0,write=1'b1} oper_type;
+ rand oper_type oper;
+
+ randc bit [7:0] data_in;
+
+ bit rx;
+ bit tx_start;
+ bit [7:0] data_out; 
+ bit tx; 
+ bit txdone; 
+ bit rxdone; 
+
+ function transaction copy();
+	copy=new();
+	copy.oper=this.oper;
+	copy.data_in=this.data_in;
+	copy.rx=this.rx;
+	copy.tx_start=this.tx_start;
+	copy.data_out=this.data_out;
+	copy.tx=this.tx;
+	copy.txdone=this.txdone;
+	copy.rxdone=this.rxdone;
+ endfunction
+
 endclass
 
 
 
 class generator;
-  
-transaction tr;
-  
-event done;
-event sconext;
-event drvnext;
-  
-int count;
 
-mailbox #(transaction) mbx;
-  
-function new(mailbox #(transaction) mbx);  
-  this.mbxd=mbxd;
-  this.mbxs=mbxs;
-endfunction
-  
-  task run();
-    repeat(count)
-      begin
-        tr=new();
-        assert(tr.randomize)
-          $display("[GEN], OPERATION : %0d, VALUE : %0d", tr.oper.name(),tr.dintx);
-        else
-          $error("RANDOMIZATION FAILED");
-        mbx.put(tr.copy);
-        @(drvnext);
-        @(sconext);
-      end
-    ->done;
-  endtask
-  
+ transaction pck; 
+ mailbox #(transaction) mbxgd; 
+
+ event drvnext; 
+ event done; 
+ event sconext;
+
+ int count=0; 
+
+ function new(mailbox #(transaction) mbxgd);
+	this.mbxgd=mbxgd;
+ endfunction
+
+ task run();
+	repeat(count)
+	begin
+		pck=new();
+		assert(pck.randomize) 
+		else
+			$error("Randomization failed");
+		mbxgd.put(pck.copy); 
+  		if(pck.oper==1)
+			$display("[GEN] : The randomized values are : data_in = %0d , operation name = %0s",pck.data_in,pck.oper.name());
+  		else
+    		$display("[GEN] : operation name = %0s",pck.oper.name());
+		@(drvnext); 
+		@(sconext);
+	end
+	->done;
+ endtask
+
 endclass
-  
+
 
 
 class driver;
+
+ transaction pck; 
+
+ mailbox #(transaction) mbxgd; 
+ mailbox #(bit [7:0]) mbxds;
   
-transaction tr;
+ bit [7:0] datarx;
+ event drvnext; 
+
+ virtual interface vif v;
+
+ function new(mailbox #(transaction) mbxgd, mailbox #(bit [7:0]) mbxds);
+	this.mbxgd=mbxgd; 
+    this.mbxds=mbxds;
+ endfunction
   
-  mailbox #(transaction) mbx;
-  mailbox #(bit [7:0]) mbxds;
+ task reset(); 
+	@(posedge v.uclktx);
+	v.rst<=1'b1;
+	v.data_in<=8'd0;
+	v.tx_start<=1'b0;
+	v.rx<=1'b1;
+	repeat(8) @(posedge v.uclktx); 
+	v.rst<=1'b0;
+	@(posedge v.uclktx);
+	$display("[DRV] : Reset done ");
+ endtask
+
+ task run();
+ forever
+ begin
+	mbxgd.get(pck); 
+	if(pck.oper==1'b1)
+	begin
+		@(posedge v.uclktx);
+		v.tx_start<=1'b1; 
+		v.data_in<=pck.data_in;
+		@(posedge v.uclktx);
+		v.tx_start<=1'b0;
+  		mbxds.put(pck.data_in);
+  		$display("[DRV] : Data to be transmitted sent = %0d",v.data_in);
+		wait(v.txdone==1'b1);
+		->drvnext; 
+	end
   
-  event drvnext;
-  
-  bit [7:0] din;
-  bit wr=0;
-  bit [7:0] datarx;
-  
-  virtual interface uart_if vif;
-    
-    function new(mailbox #(transaction) mbx, mailbox #(transaction) mbxds);
-      this.mbxs=mbxs;
-      this.mbx=mbx;
-    endfunction
-    
-    task reset();
-      vif.rst<=1'b1;
-      vif.dintx<=8'b00000000;
-      vif.newd<=0;
-      vif.rx<=1'b1;
-      repeat(5) @(posedge vif.uclktx);
-      vif.rst<=1'b0;
-      @(posedge vif.uclktx);
-      $display("[DRV] : RESET DONE");
-    endtask
-    
-    task run();
-      forever 
-        begin
-          mbx.get(tr);
-          if(tr.oper==1'b0)
-            begin
-              @(posedge vif.uclktx);
-              vif.rst<=1'b0;
-              vif.newd<=1'b1;
-              vif.rx<=1'b1;
-              vif.dintx=tr.dintx;
-              @(posedge vif.uclktx);
-              vif.newd<=1'b0;
-              mbxs.put(tr.dintx);
-              $display("[DRV] : Data sent : %0d ", tr.dintx);
-              wait(vif.donetx==1'b1);
-              ->drvnext;
-            end
-          else if(tr.oper==1'b1)
-            begin
-              @(posedge vif.uclktx);
-              vif.rst<=1'b0;
-              vif.newd<=1'b0;
-              vif.rx<=1'b0;
-              @(posedge vif.uclkrx);
-              for(int i=0;i<=7;i++)
-                begin
-                  @(posedge vif.uclkrx);
-                  vif.rx<=$urandom;
-                  datarx[i]=vif.rx;
-                end
-              
-              mbxs.put(datarx);
-              
-              $display("[DRV] : Data rcvd : %0d" , datarx);
-              wait(vif.donerx==1'b1);
-              vif.rx<=1'b1;
-              ->drvnext;
-            end
-        end
-    endtask
+	else if(pck.oper==1'b0)
+	begin
+		v.rst<=1'b0;
+		v.data_in<=8'd0;
+		v.tx_start<=1'b0;
+		@(posedge v.uclkrx);
+		v.rx=1'b0;
+		for(int i=0;i<=7;i++)
+		begin
+			@(posedge v.uclkrx);
+			datarx[i]=$urandom;
+			v.rx=datarx[i];
+		end
+  		mbxds.put(datarx);
+  		$display("[DRV] : Data received through rx pin = %0d",datarx);
+ 		// @(posedge v.uclkrx);
+		wait(v.rxdone==1'b1);
+		v.rx<=1'b1;
+		->drvnext;
+	end
+ end
+ endtask
 endclass
-    
-    
-    
-    
+
+
+   
 class monitor;
 
-  transaction tr;
+ transaction tr;
   
-  mailbox #(bit [7:0]) mbx;
+ mailbox #(bit [9:0]) mbx;
   
-  virtual uart_if vif;
+ virtual vif v;
   
-  bit[7:0] srx;
-  bit [7:0] rrx;
+ bit start,stop;
+ bit [9:0] test;
+ bit flag=0;
   
-  function new(mailbox #(bit [7:0]) mbx);
-    this.mbx=mbx;
-  endfunction
+ function new(mailbox #(bit [9:0]) mbx);
+ 	this.mbx=mbx;
+ endfunction
   
-  task run();
-    forever begin
-      @(posedge vif.uclktx);
-      if((vif.newd==1'b1)&&(vif.rx==1'b1))
+ task run();
+ 	forever 
+    begin
+    	@(posedge v.uclktx);
+        if((v.tx_start==1'b1)&&(v.rx==1'b1))
         begin
-          @(posedge vif.uclktx);
-          for(int i=0;i<=7;i++)
+        	@(posedge v.uclktx);
+            test[0]<=v.tx;
+          	for(int i=1;i<=8;i++)
             begin
-              @(posedge vif.uclktx);
-              srx[i]=vif.tx;
+            	@(posedge v.uclktx);
+                test[i]=v.tx;
             end
-          $display("[MON] : Data sent on UART TX %0d", srx);
-          @(posedge vif.uclktx);
-          mbx.put(srx);
+          	$display("[MON] : Data sent on UART TX %0d", test[8:1]);
+          	@(posedge v.uclktx);
+          	if(v.txdone==1'b1)
+            	$display("Txdone asserted successfully");
+          	else 
+              	$warning("Txdone not asserted");
+          	test[9]<=v.tx;
+          	mbx.put(test);
         end
-      else if((vif.rx==1'b0)&&(vif.newd==1'b0))
+      	else if((v.rx==1'b0)&&(v.tx_start==1'b0))
         begin
-          wait(vif.donerx==1);
-          rrx=vif.doutrx;
-          $display("[MON] : Data received RX %0d ", rrx);
-          @(posedge vif.uclktx);
-          mbx.put(rrx);
+          	test[0]<=v.rx;
+          	wait(v.rxdone==1);
+          	if(v.rxdone==1'b1)
+            	$display("Rxdone asserted successfully");
+          	else 
+            	$warning("Rxdone not asserted");
+          	test[8:1]=v.data_out;
+          	test[9]=1'b1;
+          	$display("[MON] : Data received RX %0d ", test[8:1]);
+          	@(posedge v.uclktx);
+          	mbx.put(test);
         end
     end
   endtask
@@ -371,41 +379,167 @@ endclass
               
 class scoreboard;
   
-transaction trd;
-transaction trm;
+ transaction trd;
+ transaction trm;
   
-mailbox #(bit [7:0]) mbxd;
-mailbox #(bit [7:0]) mbxm;
+ mailbox #(bit [7:0]) mbxd;
+ mailbox #(bit [9:0]) mbxm;
   
-virtual uart_if vif;
+ virtual vif v;
   
-bit [7:0] ds, ms;
+ bit [7:0] ds;
+ bit [9:0] ms;
   
-event sconext;
+ event sconext;
   
-  function new (mailbox #(bit [7:0]) mbxd, mailbox #(bit [7:0]) mbxm);
-    this.mbxd=mbxd;
+ function new (mailbox #(bit [7:0]) mbxd, mailbox #(bit [9:0]) mbxm);
+ 	this.mbxd=mbxd;
     this.mbxm=mbxm;
-  endfunction 
+ endfunction 
   
-  task run();
+ task run();
     forever 
-      begin
-        mbxd.get(ds);
+    begin
+    	mbxd.get(ds);
         mbxm.get(ms);
-        $display("[SCO] : DRV : %0d MON : %0d", ds, ms);
-        if(ds==ms)
-          $display("Data matched");
+        $display("[SCO] : DRV : %0d MON : %0d", ds, ms[8:1]);
+        if(ds==(ms[8:1]))
+        	$display("Data matched");
         else
-          $display("Data mismatched");
+          	$display("Data mismatched");
+        if((ms[9]==1'b1)&&(ms[0]==1'b0))
+          	$display("[SCO] : Start and stop bits satisfy the conditions, stop = %0d, start=%0d",ms[9],ms[0]);
+        else
+          	$display("[SCO] : Start and stop bits do not satisfy the conditions, start = %0d, stop=%0d",ms[9],ms[0]);
+        $display("*******************************************************************************************************************************************************");
         ->sconext;
       end
   endtask
 endclass
-    
-    
-    
+                 
+  
+   
 class environment;
   
-  generator 
-////////////////////////////////////////////////////// .............STILL WRITING CODE.................////////////////////////////////////////////////
+ mailbox #(transaction) mbxgd;
+ mailbox #(bit [7:0]) mbxds;
+ mailbox #(bit [9:0]) mbxms;
+  
+ event sconext;
+ event drvnext;
+  
+ virtual interface vif v;
+  
+ driver drv;
+ monitor mon;
+ generator gen;
+ scoreboard sco;
+  
+ function new(virtual vif v);
+    mbxgd=new();
+    mbxds=new();
+    mbxms=new();
+    
+    drv=new(mbxgd,mbxds);
+    gen=new(mbxgd);
+    mon=new(mbxms);
+    sco=new(mbxds,mbxms);
+    
+    this.v=v;
+    mon.v=v;
+    drv.v=v;
+    
+    gen.sconext=sconext;
+    sco.sconext=sconext;
+    
+    drv.drvnext=drvnext;
+    gen.drvnext=drvnext;
+  
+ endfunction
+    
+ task pre_test();
+ 	drv.reset();
+ endtask
+    
+ task test();
+ 	fork
+    	gen.run();
+        drv.run();
+        mon.run();
+        sco.run();
+    join_any
+ endtask
+    
+ task post_test();      
+ 	$finish;    
+ endtask
+    
+ task run();
+ 	pre_test();
+    test();
+    // post_test();
+ endtask
+    
+endclass 
+      
+
+    
+module tb;
+  
+ vif v1();
+ vif v2();
+ vif v3();
+
+ uart_top u1(v1.clk,v1.rst,v1.rx,v1.data_in,v1.tx_start,v1.tx,v1.data_out,v1.txdone,v1.rxdone);
+      
+ uart_top #(100000,4800) u2(v2.clk,v2.rst,v2.rx,v2.data_in,v2.tx_start,v2.tx,v2.data_out,v2.txdone,v2.rxdone);
+      
+ uart_top #(100000,15200) u3(v3.clk,v3.rst,v3.rx,v3.data_in,v3.tx_start,v3.tx,v3.data_out,v3.txdone,v3.rxdone);
+  
+ environment env;
+  
+ initial v1.clk<=1'b0;
+ initial v2.clk<=1'b0;
+ initial v3.clk<=1'b0;
+  
+ always #500 v1.clk<=~v1.clk;
+ always #50 v2.clk<=~v2.clk;
+ always #50 v3.clk<=~v3.clk;
+  
+ assign v1.uclktx=u1.utx.uclk,
+  		v1.uclkrx=u1.rtx.uclk;
+      
+ assign v2.uclktx=u2.utx.uclk,
+  		v2.uclkrx=u2.rtx.uclk;
+      
+ assign v3.uclktx=u3.utx.uclk,
+      	v3.uclkrx=u3.rtx.uclk;
+  
+ initial
+ 	begin
+    	env=new(v1);
+      	env.gen.count=10;
+      	$display("*****************************BAUD RATE = 9600************************************");
+      	$display("*********************************************************************************");
+      	env.run();
+      	env=new(v2);
+      	env.gen.count=10;
+      	$display("*****************************BAUD RATE = 4800************************************");
+      	$display("*********************************************************************************");
+      	env.run();
+      	env=new(v3);
+      	env.gen.count=10;
+      	$display("*****************************BAUD RATE = 15200************************************");
+      	$display("*********************************************************************************");
+      	env.run();
+      	wait(env.gen.done.triggered);
+      	env.post_test();
+    end
+  
+ initial 
+ begin
+ 	$dumpfile("dump.vcd");
+    $dumpvars;
+ end
+  
+endmodule
